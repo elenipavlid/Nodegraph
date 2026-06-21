@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>NodeGraph</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; width: 100%; }
+    #mynetwork { width: 100%; height: 100%; }
+    form { position: absolute; background: #898989; z-index: 10; padding: 10px; border-radius: 0 0 5px 0; }
+    button.action { margin-top: 5px; width: 100%; padding: 5px; font-size: 14px; cursor: pointer; }
+    /* Ensure all buttons stay the same size and alignment */
+    form { width: 200px; /* lock consistent form width */ }
+   
+    form input,
+    form button.action {
+      display: block;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    #nodeTooltip {
+      position: absolute;
+      background: rgba(0,0,0,0.85);
+      color: #fff;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      max-width: 250px;
+      z-index: 99999;
+      display: none;
+      pointer-events: none;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+      transition: opacity 0.15s ease-in-out;
+      opacity: 0;
+    }
+
+    /* Notice / modal styles */
+    .notice-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 20000;
+      backdrop-filter: blur(2px);
+    }
+    .notice-box {
+      background: #fff;
+      color: #111;
+      padding: 18px;
+      border-radius: 10px;
+      width: min(560px, 92%);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+      position: relative;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    }
+    .notice-close {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: transparent;
+      border: none;
+      font-size: 18px;
+      cursor: pointer;
+      line-height: 1;
+      color: #333;
+    }
+    .notice-title {
+      margin: 0 0 6px 0;
+      font-size: 18px;
+      font-weight: 600;
+    }
+    .notice-body {
+      margin-bottom: 12px;
+      font-size: 14px;
+      line-height: 1.4;
+      color: #333;
+    }
+    .notice-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .notice-btn {
+      background: #2d7ef7;
+      color: #fff;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .notice-skip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: #444;
+    }
+    @media (max-width: 480px) {
+      .notice-box { padding: 14px; }
+      .notice-title { font-size: 16px; }
+    }
+
+    /* Toggle switch styling */
+    label[for="isolatedToggle"],
+    #isolatedLabel {
+     flex: 1;
+     display: flex;
+     align-items: center;          /* vertical centering */
+     justify-content: center;      /* horizontal centering */
+     height: 32px;                 /* same height as buttons */
+     font-size: 14px;              /* same text size */
+     font-family: inherit;         /* match form button font */
+     font-weight: normal;          /* same weight as buttons */
+     background: #f0f0f0;          /* same background */
+     border-radius: 5px;
+     text-align: center;
+     box-sizing: border-box;
+     user-select: none;
+     cursor: default;
+     color: #000;                  /* match button text color */
+    }
+    #isolatedLabel:hover {
+      background: #e0e0e0; /* subtle hover effect like other buttons */
+    }
+    .switch {
+      display: flex;
+      align-items: center; /* vertically centers slider */
+      justify-content: center;
+      width: 60px;
+      height: 28px;
+      position: relative;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #ccc;
+      transition: 0.4s;
+      border-radius: 34px;
+    }
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 22px;
+      width: 22px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: 0.4s;
+      border-radius: 50%;
+    }
+    input:checked + .slider { background-color: #2d7ef7; }
+    input:checked + .slider:before { transform: translateX(32px); }
+  </style>
+
+  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+  <script src="data.js"></script>
+  
+  <script>
+    let network;
+    let nodes = new vis.DataSet();
+    let edges = new vis.DataSet();
+    let originalNodes = [];
+    let originalEdges = [];
+    let lookupCount = 0;
+    let physicsEnabled = true;
+    let longestPathCache = new Map();
+    
+    function loadData() {
+      const graph = window.graphData;
+      originalNodes = graph.nodes.map(n => ({ ...n }));
+      originalEdges = graph.edges.map((e, i) => ({ id: e.id || ("e" + i), ...e }));
+    
+      nodes = new vis.DataSet(originalNodes);
+      edges = new vis.DataSet(originalEdges);
+    
+      computeAllLongestPaths();
+      draw();
+      showNoticeIfNeeded();
+    }
+
+    /* -------------------------
+       Notice UI / persistence
+       ------------------------- */
+    function showNoticeIfNeeded() {
+      try {
+        const closed = localStorage.getItem('siteNoticeClosed');
+        if (closed === '1') return; 
+      } catch (e) {}
+      createAndShowNotice();
+    }
+
+    function createAndShowNotice() {
+      const overlay = document.createElement('div');
+      overlay.className = 'notice-overlay';
+      overlay.id = 'siteNoticeOverlay';
+      overlay.setAttribute('role', 'dialog');
+      overlay.setAttribute('aria-modal', 'true');
+
+      overlay.innerHTML = `
+        <div class="notice-box" role="document" aria-labelledby="noticeTitle">
+          <button class="notice-close" aria-label="Close notice" id="noticeCloseBtn">&times;</button>
+          <h3 id="noticeTitle" style="text-align: center; font-size:20px;" class="notice-title">NodeGraph</h3>
+          <div class="notice-body" style="font-size: 16px; line-height: 1.5;";>
+            This is an interactive data visualization platform.<br>Use the interface to explore network clusters, structural connections, and directional paths.
+          </div>
+          <div class="notice-actions">
+            <div class="notice-skip">
+              <label><input type="checkbox" id="dontShowAgain"> Don't show again</label>
+            </div>
+            <div>
+              <button class="notice-btn" id="noticeGotIt">Got it</button>
+            </div>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(overlay);
+      document.getElementById('noticeCloseBtn').addEventListener('click', closeNotice);
+      document.getElementById('noticeGotIt').addEventListener('click', closeNotice);
+      overlay.addEventListener('click', (ev) => {
+        if (ev.target === overlay) closeNotice();
+      });
+    }
+
+    function closeNotice() {
+      const overlay = document.getElementById('siteNoticeOverlay');
+      if (!overlay) return;
+      const dontShow = document.getElementById('dontShowAgain');
+      try {
+        if (dontShow && dontShow.checked) {
+          localStorage.setItem('siteNoticeClosed', '1');
+        }
+      } catch (e) {}
+      overlay.remove();
+    }
+	
+    /* -------------------------
+       Graph Logic
+       ------------------------- */
+    function computeAllLongestPaths() {
+      originalNodes.forEach(node => {
+        longestPathCache.set(node.id, getLongestPathLength(node.id));
+      });
+    }
+    
+    function getLongestPathLength(startId) {
+      if (longestPathCache.has(startId)) return longestPathCache.get(startId);
+      let maxLength = 0;
+      function dfs(nodeId, path) {
+        path.push(nodeId);
+        if (path.length > maxLength) maxLength = path.length;
+        const neighbors = originalEdges
+          .filter(e => e.from === nodeId || e.to === nodeId)
+          .map(e => e.from === nodeId ? e.to : e.from);
+        neighbors.forEach(n => {
+          if (!path.includes(n)) dfs(n, [...path]);
+        });
+      }
+      dfs(startId, []);
+      longestPathCache.set(startId, maxLength);
+      return maxLength;
+    }
+
+    function getLongestPath(startId) {
+      const visited = new Set([startId]);
+      const queue = [{ id: startId, dist: 0, path: [startId], edges: [] }];
+      let best = { length: 0, pathNodes: [startId], pathEdges: [] };
+      
+      while (queue.length) {
+        const { id, dist, path, edges: edgesPath } = queue.shift();
+      
+        if (dist > best.length) {
+          best = { length: dist, pathNodes: [...path], pathEdges: [...edgesPath] };
+        }
+      
+        originalEdges.forEach(edge => {
+          let neighbor = null;
+          if (edge.from === id) neighbor = edge.to;
+          else if (edge.to === id) neighbor = edge.from;
+      
+          if (neighbor && !visited.has(neighbor)) {
+            visited.add(neighbor);
+            queue.push({
+              id: neighbor,
+              dist: dist + 1,
+              path: [...path, neighbor],
+              edges: [...edgesPath, edge.id]
+            });
+          }
+        });
+      }
+      return best; 
+    }   
+
+    let previouslyHighlightedEdges = [];
+    let previouslyHighlightedNodes = [];
+     
+    function highlightPath(pathNodes, pathEdges) {
+      if (previouslyHighlightedEdges.length) {
+        edges.update(previouslyHighlightedEdges.map(id => ({ id, width: 1 })));
+      }
+      if (previouslyHighlightedNodes.length) {
+        nodes.update(previouslyHighlightedNodes.map(id => ({ id, size: 30 })));
+      }
+      edges.update(pathEdges.map(id => ({ id, width: 4 })));
+      nodes.update(pathNodes.map(id => ({ id, size: 40 })));
+     
+      previouslyHighlightedEdges = pathEdges;
+      previouslyHighlightedNodes = pathNodes;
+     
+      network.selectNodes(pathNodes);
+      network.selectEdges(pathEdges);
+    }
+
+    function draw() {
+      const container = document.getElementById("mynetwork");
+      const data = { nodes, edges };
+      const options = {
+        nodes: { shape: "circularImage", borderWidth: 2, size: 30, font: { size: 16, color: "#000" } },
+        edges: { width: 1, color: { color: "#888", opacity: 0.4 }, smooth: { type: "continuous" } },
+       physics: {
+          enabled: true,
+          solver: "forceAtlas2Based",
+          forceAtlas2Based: { centralGravity: 0.001, springLength: 180, springConstant: 0.02, damping: 0.09, avoidOverlap: 0.8 },
+          stabilization: { iterations: 700, fit: true }
+        },
+        layout: { improvedLayout: false },
+        interaction: { hover: true, dragNodes: true, navigationButtons: false, keyboard: true }
+      };
+      network = new vis.Network(container, data, options);
+      network.once("stabilizationIterationsDone", () => network.setOptions({ physics: { enabled: false } }));
+    
+      const tooltip = document.getElementById("nodeTooltip");
+      let tooltipVisible = false;
+
+      network.on("hoverNode", params => {
+        const node = nodes.get(params.node);
+        if (!node) return;
+
+        network.on("blurNode", () => {
+          tooltip.style.opacity = "0";
+          setTimeout(() => { tooltip.style.display = "none"; }, 150); 
+          tooltipVisible = false;
+        });
+        
+        network.unselectAll();
+        const { length, pathNodes, pathEdges } = getLongestPath(node.id);
+      
+        let html = `<strong>${node.label}</strong><br>`;
+        if (node.subgroup) html += `Classification: ${node.subgroup}<br>`;
+        if (node.group) html += `Cluster: ${node.group}<br>`;
+        html += `Longest chain: ${length}`;
+      
+        tooltip.innerHTML = html;
+        tooltip.style.display = "block";
+        requestAnimationFrame(() => { tooltip.style.opacity = "1"; });
+        tooltipVisible = true;
+      
+        highlightPath(pathNodes, pathEdges);
+      });
+
+      container.addEventListener("mousemove", ev => {
+        if (!tooltipVisible) return;
+        const offset = 12;
+        let x = ev.clientX + offset;
+        let y = ev.clientY + offset;
+        const pad = 8;
+        const w = tooltip.offsetWidth || 200;
+        const h = tooltip.offsetHeight || 40;
+        if (x + w > window.innerWidth - pad) x = window.innerWidth - w - pad;
+        if (y + h > window.innerHeight - pad) y = ev.clientY - h - offset;
+        tooltip.style.left = x + "px";
+        tooltip.style.top = y + "px";
+      });
+    }
+    
+     function togglePhysics() {
+      physicsEnabled = !physicsEnabled;
+      network.setOptions({ physics: { enabled: physicsEnabled } });
+      document.getElementById("physicsIcon").className = physicsEnabled ? "fas fa-pause" : "fas fa-play";
+    }
+    
+    let searchMatches = [];   
+    let searchIndex = 0;      
+    
+    function highlightNode() {
+      const raw = document.getElementById("lname").value || "";
+      if (!raw.trim()) return;
+    
+      const criteria = [];
+      const regex = /(?:\b(subgroup|group|label|name):(?:"([^"]+)"|'([^']+)'|([^\s,]+))|"(.*?)"|'(.*?)'|([^\s,]+))/gi;
+      let m;
+      while ((m = regex.exec(raw)) !== null) {
+        if (m[1]) {
+          const key = m[1].toLowerCase();
+          const val = (m[2] || m[3] || m[4] || "").toLowerCase().trim();
+          if (val) criteria.push({ field: key, value: val });
+        } else {
+          const val = (m[5] || m[6] || m[7] || "").toLowerCase().trim();
+          if (val) criteria.push({ field: "any", value: val });
+        }
+      }
+      if (!criteria.length) return;
+    
+      const allNodes = nodes.get();
+      const matches = allNodes.filter(n => {
+        const label = (n.label || "").toLowerCase();
+        const subgroup = (n.subgroup || "").toLowerCase();
+        const group = (n.group || "").toLowerCase();
+        return criteria.every(c => {
+          if (c.field === "subgroup") return subgroup.includes(c.value);
+          if (c.field === "group") return group.includes(c.value);
+          if (c.field === "label" || c.field === "name") return label.includes(c.value);
+          return label.includes(c.value) || subgroup.includes(c.value) || group.includes(c.value);
+        });
+      });
+    
+      if (!matches.length) {
+        console.warn("No nodes matched search.");
+        return;
+      }
+    
+      const currentQuery = JSON.stringify(criteria);
+      if (!searchMatches.query || searchMatches.query !== currentQuery) {
+        searchMatches = { nodes: matches, query: currentQuery };
+        searchIndex = 0;
+      }
+    
+      const target = searchMatches.nodes[searchIndex % searchMatches.nodes.length];
+      searchIndex++;
+    
+      const opts = { 
+        scale: 1.5, 
+        offset: { x: 0, y: 0 }, 
+        animation: { duration: 800, easingFunction: "easeInOutQuad" } 
+      };
+      network.focus(target.id, opts);
+      network.selectNodes([target.id]);
+    }
+
+    function filterGraph() {
+      const raw = document.getElementById("lname").value || "";
+      if (!raw.trim()) { resetGraph(); return; }
+    
+      const criteria = [];
+      const regex = /(?:\b(subgroup|group|label|name):(?:"([^"]+)"|'([^']+)'|([^\s,]+))|"(.*?)"|'(.*?)'|([^\s,]+))/gi;
+      let m;
+      while ((m = regex.exec(raw)) !== null) {
+        if (m[1]) {
+          const key = m[1].toLowerCase();
+          const val = (m[2] || m[3] || m[4] || "").toLowerCase().trim();
+          if (val) criteria.push({ field: key, value: val });
+        } else {
+          const val = (m[5] || m[6] || m[7] || "").toLowerCase().trim();
+          if (val) criteria.push({ field: "any", value: val });
+        }
+      }
+    
+      if (!criteria.length) { resetGraph(); return; }
+    
+      const matches = originalNodes.filter(n => {
+        const label = (n.label || "").toLowerCase();
+        const subgroup = (n.subgroup || "").toLowerCase();
+        const group = (n.group || "").toLowerCase();
+        return criteria.every(c => {
+          if (c.field === "subgroup") return subgroup.includes(c.value);
+          if (c.field === "group") return group.includes(c.value);
+          if (c.field === "label" || c.field === "name") return label.includes(c.value);
+          return label.includes(c.value) || subgroup.includes(c.value) || group.includes(c.value);
+        });
+      });
+    
+      if (!matches.length) {
+        console.warn("No nodes matched. Graph unchanged.");
+        return;
+      }
+    
+      const included = new Set(matches.map(n => String(n.id)));
+      const queue = matches.map(n => String(n.id));
+      while (queue.length) {
+        const id = queue.shift();
+        for (const e of originalEdges) {
+          const from = String(e.from);
+          const to = String(e.to);
+          if (from === id && !included.has(to)) { included.add(to); queue.push(to); }
+          if (to === id && !included.has(from)) { included.add(from); queue.push(from); }
+        }
+      }
+    
+      nodes.clear();
+      nodes.add(originalNodes.filter(n => included.has(String(n.id))));
+    
+      edges.clear();
+      edges.add(originalEdges.filter(e =>
+        included.has(String(e.from)) && included.has(String(e.to))
+      ));
+    
+      previouslyHighlightedEdges = [];
+      previouslyHighlightedNodes = [];
+      network.unselectAll();
+    
+      network.setOptions({ physics: { enabled: true } });
+      network.fit({ animation: { duration: 500, easingFunction: "easeInOutQuad" } });
+      network.once("stabilizationIterationsDone", () => network.setOptions({ physics: { enabled: false } }));
+      setTimeout(() => { network.fit({ animation: { duration: 500, easingFunction: "easeInOutQuad" } }); }, 400);
+
+      const isolatedToggle = document.getElementById('isolatedToggle');
+      if (isolatedToggle) {
+        isolatedToggle.checked = false;
+        showIsolated = true;
+      }
+    }
+
+    function resetGraph() {
+      document.getElementById("lname").value = "";
+      nodes.clear(); 
+      nodes.add(originalNodes);
+      edges.clear(); 
+      edges.add(originalEdges);
+     
+      network.setOptions({ physics: { enabled: true } });
+      network.fit({ animation: { duration: 500, easingFunction: "easeInOutQuad" } });
+      network.once("stabilizationIterationsDone", () => network.setOptions({ physics: { enabled: false } }));
+      setTimeout(() => { network.fit({ animation: { duration: 500, easingFunction: "easeInOutQuad" } }); }, 400);  
+      
+      const isolatedToggle = document.getElementById('isolatedToggle');
+      if (isolatedToggle) {
+        isolatedToggle.checked = false;
+        showIsolated = true;
+      }
+    }
+
+    function showFeaturesModal() {
+      if (document.getElementById('featuresOverlay')) return; 
+    
+      const overlay = document.createElement('div');
+      overlay.className = 'notice-overlay';
+      overlay.id = 'featuresOverlay';
+    
+      overlay.innerHTML = `
+        <div class="notice-box" role="dialog" aria-labelledby="featuresTitle">
+         <button class="notice-close" aria-label="Close features">&times;</button>
+         <h3 id="featuresTitle" class="notice-title" style="text-align:center;">Features</h3>
+         <div class="notice-body">
+           <ul style="padding-left:20px; line-height:1.6; margin:0;">
+            <strong>Search & Filtering</strong>
+            <li>Smart search bar: Find nodes, classifications, or clusters by name or keyword.</li>
+            <li>Advanced filters: Combine multiple terms like "ClusterA" + "CategoryX".</li>
+            <li>Context expansion: Automatically includes directly connected nodes when filtering.</li>
+            <li>Cycle through results: When multiple matches exist, click again to jump between them.</li>
+            <li>Reset graph: Instantly return to the full global view.</li>		
+            <strong>Interaction & Motion</strong>		
+            <li>Physics toggle: Pause or resume network motion to explore clusters comfortably.</li>
+            <li>Hide Isolated Toggle: Declutter the graph by removing nodes with no active connections.</li>
+            <li>Drag & explore: Move nodes manually to rearrange your view without breaking the layout.</li>
+            <strong>Node Info & Tooltips</strong>
+            <li>Hover tooltips: Instantly see node metadata and longest connection chain.</li>
+            <li>Highlight persistence: Hovered nodes and paths remain highlighted until you hover elsewhere.</li>		
+           </ul>
+         </div>
+         <div style="text-align:right; margin-top:10px;">
+           <button class="notice-btn">Close</button>
+         </div>
+        </div>
+      `;
+       
+      document.body.appendChild(overlay);
+      const close = () => overlay.remove();
+      overlay.querySelector('.notice-close').addEventListener('click', close);
+      overlay.querySelector('.notice-btn').addEventListener('click', close);
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    }
+       
+    document.addEventListener('DOMContentLoaded', () => {
+      const btn = document.getElementById('featuresBtn');
+      if (btn) btn.addEventListener('click', showFeaturesModal);
+    });
+
+    let lastFilteredNodeIds = null; 
+    
+    function hideIsolatedNodes() {
+      const currentNodes = nodes.get();
+      const currentEdges = edges.get();
+    
+      lastFilteredNodeIds = new Set(currentNodes.map(n => n.id));
+      const connectedIds = new Set();
+      currentEdges.forEach(e => {
+        connectedIds.add(e.from);
+        connectedIds.add(e.to);
+      });
+    
+      const connectedNodes = currentNodes.filter(n => connectedIds.has(n.id));
+      const connectedEdges = currentEdges.filter(e => connectedIds.has(e.from) && connectedIds.has(e.to));
+    
+      nodes.clear(); nodes.add(connectedNodes);
+      edges.clear(); edges.add(connectedEdges);
+    
+      network.setOptions({ physics: { enabled: true } });
+      network.fit({ animation: { duration: 500, easingFunction: "easeInOutQuad" } });
+      network.once("stabilizationIterationsDone", () => network.setOptions({ physics: { enabled: false } }));
+      setTimeout(() => { network.fit({ animation: { duration: 500, easingFunction: "easeInOutQuad" } }); }, 400);
+    }
+    
+    function showIsolatedNodes() {
+      let nodesToRestore, edgesToRestore;
+      if (lastFilteredNodeIds && lastFilteredNodeIds.size > 0) {
+        nodesToRestore = originalNodes.filter(n => lastFilteredNodeIds.has(n.id));
+        edgesToRestore = originalEdges.filter(e => lastFilteredNodeIds.has(e.from) && lastFilteredNodeIds.has(e.to));
+      } else {
+        nodesToRestore = originalNodes;
+        edgesToRestore = originalEdges;
+      }
+    
+      nodes.clear(); nodes.add(nodesToRestore);
+      edges.clear(); edges.add(edgesToRestore);
+           
+      network.setOptions({ physics: { enabled: true } });
+      network.fit({ animation: { duration: 500, easingFunction: "easeInOutQuad" } });
+      network.once("stabilizationIterationsDone", () => network.setOptions({ physics: { enabled: false } }));
+      setTimeout(() => { network.fit({ animation: { duration: 500, easingFunction: "easeInOutQuad" } }); }, 400);
+    }
+           
+    document.addEventListener('DOMContentLoaded', () => {
+      const toggle = document.getElementById('isolatedToggle');
+      toggle.checked = false;
+      showIsolated = true;
+    
+      toggle.addEventListener('change', () => {
+        if (toggle.checked) {
+          hideIsolatedNodes();
+          showIsolated = false;
+        } else {
+          showIsolatedNodes();
+          showIsolated = true;
+        }
+      });
+    });
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const input = document.getElementById('lname');
+      if (input) {
+        input.addEventListener('keypress', function (event) {
+          if (event.key === 'Enter') {
+            event.preventDefault(); 
+            highlightNode();        
+          }
+        });
+      }
+    });
+
+    window.onload = loadData;
+  </script>
+</head>
+<body>
+  <form action="javascript:void(0);">
+    <input type="text" id="lname" placeholder="Label, classification, or cluster" style="width:180px">
+    <button type="button" class="action" onclick="highlightNode()">Search</button>
+    <button type="button" class="action" onclick="filterGraph()">Filter</button>
+    <button type="button" class="action" onclick="resetGraph()">Reset</button>
+    <button type="button" class="action" onclick="togglePhysics()"><i id="physicsIcon" class="fas fa-pause"></i></button> 
+    <label style="display: flex; align-items: center; justify-content: space-between; margin-top:5px; width: 100%; gap: 8px;">
+      <span id="isolatedLabel">Hide Isolated</span>
+      <div class="switch">
+        <input type="checkbox" id="isolatedToggle">
+        <span class="slider round"></span>
+      </div>
+    </label>
+    <button type="button" class="action" id="featuresBtn">Features</button>
+  </form>
+  
+  <div id="mynetwork"></div>
+  <div id="nodeTooltip"></div>
+</body>
+</html>
